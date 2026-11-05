@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
@@ -19,6 +20,10 @@ from app.routers import conversations, health, models
 log = logging.getLogger("app")
 
 QUIET_PATHS = {"/health", "/ready"}
+DATABASE_DOWN_MESSAGE = (
+    "The database is unavailable. Start Postgres with `make db-up` "
+    "(and `colima start` first if Docker isn't running)."
+)
 
 
 def create_app(
@@ -90,6 +95,18 @@ def create_app(
     @app.exception_handler(OllamaError)
     async def ollama_unavailable(_: Request, exc: OllamaError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=503)
+
+    async def database_unavailable(request: Request, exc: Exception) -> JSONResponse:
+        log.error(
+            "database unavailable",
+            extra={"path": request.url.path, "error": f"{type(exc).__name__}: {exc}"},
+        )
+        return JSONResponse({"detail": DATABASE_DOWN_MESSAGE}, status_code=503)
+
+    # Postgres down or restarting: refused connections surface as OSError subclasses from
+    # asyncpg; a connection lost mid-session surfaces as a SQLAlchemy DBAPI error.
+    for exc_type in (ConnectionError, TimeoutError, OperationalError, InterfaceError):
+        app.add_exception_handler(exc_type, database_unavailable)
 
     app.include_router(health.router)
     app.include_router(models.router)
